@@ -5,10 +5,7 @@
 
 #![allow(unused_imports)]
 #![allow(unreachable_code)]
-use std::{
-    net::{Ipv4Addr, SocketAddrV4},
-    pin::Pin,
-};
+use std::{net::{Ipv4Addr, SocketAddrV4}, pin::Pin, sync::mpsc::Receiver};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     io::{AsyncReadExt, AsyncWriteExt},
@@ -24,21 +21,42 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(socket).await.unwrap();
     // no incoming method in tokio::TcpListener
 
-    loop {
+    // A broadcast chanell is a mpmc channel
+    let (tx, mut _rx) = tokio::sync::broadcast::channel::<String>(10);
+
+    '_task_spawner: loop {
+        
         let (mut connection, _addr) = listener.accept().await?;
+        // clone `tx` and `rx` for each separate connection
+        let tx = tx.clone();
+        let mut rx = tx.subscribe();
+
         println!("Connected to {:?}", _addr);
+        let client = _addr.to_string();
         let _task: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
             let (conn_reader, mut conn_writer) = connection.split();
             let mut conn_reader = BufReader::new(conn_reader);
-
             let mut line = String::new();
             'echo: loop {
                 line.clear();
+                // Messages are out of order because two async calls the one right below and the 
+                // rx.recv().await call are both blocking calls and so the order in which they are 
+                // written in code will dictate the order in which messages are typed and received
+                // So we would like to make these two tasks concurrent.
+                
                 let bytes_read = conn_reader.read_line(&mut line).await?;
                 if &line == "quit\r\n" || bytes_read == 0 {
                     println!("Exiting...");
                     break 'echo;
                 }
+                tx.send(line.clone()).expect("Failed to send message");
+                // Read from broadcast channel and write to stream
+                if let Ok(msg) = rx.recv().await {
+                    conn_writer.write_all( msg.as_bytes()).await?;
+                }
+                
+                // echo functionality
+                let line = format!("{c}: {l}", c=client, l=line);
                 conn_writer.write_all(line.as_bytes()).await?;
             }
             Ok(())
