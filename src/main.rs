@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
 async fn get_name(socket: &mut TcpStream) -> String {
     // prompt the user to enter their name and use this as their ID
     let _ = socket
-        .write_all("Enter your name please:\n".as_bytes())
+        .write_all("Enter your name please: ".as_bytes())
         .await;
         
     let (reader, _) = socket.split();
