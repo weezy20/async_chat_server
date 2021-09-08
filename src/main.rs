@@ -5,7 +5,7 @@
 
 #![allow(unused_imports)]
 #![allow(unreachable_code)]
-use std::{net::{Ipv4Addr, SocketAddrV4}};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,39 +25,61 @@ async fn main() -> Result<()> {
     let (tx, mut _rx) = tokio::sync::broadcast::channel::<String>(10);
 
     '_task_spawner: loop {
-        
-        let (mut connection, _addr) = listener.accept().await?;
+        let (mut connection, addr) = listener.accept().await?;
         // clone `tx` and `rx` for each separate connection
         let tx = tx.clone();
         let mut rx = tx.subscribe();
 
-        println!("Connected to {:?}", _addr);
-        let client = _addr.to_string();
+        println!("Connected to {:?}", addr);
+        let client = get_name(&mut connection).await;
+
         let _task: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
             let (conn_reader, mut conn_writer) = connection.split();
             let mut conn_reader = BufReader::new(conn_reader);
             let mut line = String::new();
             'echo: loop {
                 line.clear();
-                // Messages are out of order because two async calls the one right below and the 
-                // rx.recv().await call are both blocking calls and so the order in which they are 
+                // Messages are out of order because two async calls the one right below and the
+                // rx.recv().await call are both blocking calls and so the order in which they are
                 // written in code will dictate the order in which messages are typed and received
                 // So we would like to make these two tasks concurrent.
-                
-                let bytes_read = conn_reader.read_line(&mut line).await?;
-                if &line == "quit\r\n" || bytes_read == 0 {
-                    println!("Exiting...");
-                    break 'echo;
+                tokio::select! {
+                    bytes_read = conn_reader.read_line(&mut line) => {
+                        let bytes_read = bytes_read?;
+                        if &line == "quit\r\n" || bytes_read == 0 {
+                            println!("Exiting...");
+                            break 'echo;
+                        }
+                        let line = format!("{c}: {l}", c=client, l=line);
+                        tx.send(line.clone()).expect("Failed to send message");
+                        conn_writer.write_all(line.as_bytes()).await?;
+                    }
+
+                    msg = rx.recv()=> {
+                        match msg {
+                            Ok(msg) => {
+                                if !msg.contains(&client) {
+                                    conn_writer.write_all(msg.as_bytes()).await?;
+                                }
+                            }
+                            Err(_) => continue 'echo,
+                        }
+                    }
                 }
-                tx.send(line.clone()).expect("Failed to send message");
-                // Read from broadcast channel and write to stream
-                if let Ok(msg) = rx.recv().await {
-                    conn_writer.write_all( msg.as_bytes()).await?;
-                }
-                
-                // echo functionality
-                let line = format!("{c}: {l}", c=client, l=line);
-                conn_writer.write_all(line.as_bytes()).await?;
+                // let bytes_read = conn_reader.read_line(&mut line).await?;
+                // if &line == "quit\r\n" || bytes_read == 0 {
+                //     println!("Exiting...");
+                //     break 'echo;
+                // }
+                // tx.send(line.clone()).expect("Failed to send message");
+                // // Read from broadcast channel and write to stream
+                // if let Ok(msg) = rx.recv().await {
+                //     conn_writer.write_all( msg.as_bytes()).await?;
+                // }
+
+                // // echo functionality
+                // let line = format!("{c}: {l}", c=client, l=line);
+                // conn_writer.write_all(line.as_bytes()).await?;
             }
             Ok(())
         });
@@ -66,6 +88,20 @@ async fn main() -> Result<()> {
     }
     unreachable!();
     Ok(())
+}
+
+async fn get_name(socket: &mut TcpStream) -> String {
+    // prompt the user to enter their name and use this as their ID
+    let _ = socket
+        .write_all("Enter your name please:\n".as_bytes())
+        .await;
+        
+    let (reader, _) = socket.split();
+    let mut reader = BufReader::new(reader);
+    let mut name = String::from("");
+    let _ = reader.read_line(&mut name).await;
+    let name = name.trim_end_matches(&['\r', '\n'][..]).to_string();
+    name
 }
 
 // #[cfg(target_os = "linux")]
